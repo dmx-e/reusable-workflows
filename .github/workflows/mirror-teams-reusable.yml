@@ -1,0 +1,125 @@
+name: Reusable Team Mirror Workflow
+
+# This workflow automatically mirrors organization teams and memberships
+# from a source organization to a target organization.
+#
+# Required Configuration in the CALLING repository:
+#
+# VARIABLES (Settings → Secrets and variables → Actions → Variables):
+#   MIRROR_SOURCE_ORG: Source organization name
+#   MIRROR_TARGET_ORG: Target organization name
+#   MIRROR_SOURCE_HOST: (Optional) Source GitHub host, defaults to "github.com"
+#   MIRROR_TARGET_HOST: (Optional) Target GitHub host, defaults to "github.com"
+#
+# SECRETS (Settings → Secrets and variables → Actions → Secrets):
+#   MIRROR_SOURCE_TOKEN: GitHub token for source org (read:org, read:team scopes)
+#   MIRROR_TARGET_TOKEN: GitHub token for target org (admin:org scope)
+#
+# ===== Example 1: Mirror within GitHub.com =====
+# Variables:
+#   MIRROR_SOURCE_ORG: "source-org"
+#   MIRROR_TARGET_ORG: "target-org"
+#   MIRROR_SOURCE_HOST: "github.com" (or leave empty)
+#   MIRROR_TARGET_HOST: "github.com" (or leave empty)
+# Secrets:
+#   MIRROR_SOURCE_TOKEN: "ghp_xxxxxxxxxxxxxxxxxxxx"
+#   MIRROR_TARGET_TOKEN: "ghp_xxxxxxxxxxxxxxxxxxxx"
+#
+# ===== Example 2: Mirror from GHES to GitHub.com =====
+# Variables:
+#   MIRROR_SOURCE_ORG: "enterprise-org"
+#   MIRROR_TARGET_ORG: "cloud-org"
+#   MIRROR_SOURCE_HOST: "github.company.com"
+#   MIRROR_TARGET_HOST: "github.com"
+# Secrets:
+#   MIRROR_SOURCE_TOKEN: "ghp_xxxxxxxxxxxxxxxxxxxx"
+#   MIRROR_TARGET_TOKEN: "ghp_xxxxxxxxxxxxxxxxxxxx"
+
+on:
+  workflow_call:
+
+jobs:
+  mirror-teams:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    
+    steps:
+      - name: Validate configuration
+        env:
+          MIRROR_SOURCE_ORG: ${{ vars.MIRROR_SOURCE_ORG }}
+          MIRROR_TARGET_ORG: ${{ vars.MIRROR_TARGET_ORG }}
+        run: |
+          if [ -z "$MIRROR_SOURCE_ORG" ]; then
+            echo "Error: MIRROR_SOURCE_ORG variable is not set"
+            exit 1
+          fi
+          if [ -z "$MIRROR_TARGET_ORG" ]; then
+            echo "Error: MIRROR_TARGET_ORG variable is not set"
+            exit 1
+          fi
+          
+          echo "Team mirror configuration:"
+          echo "  Source org: $MIRROR_SOURCE_ORG"
+          echo "  Target org: $MIRROR_TARGET_ORG"
+          echo "  Source host: ${MIRROR_SOURCE_HOST:-github.com}"
+          echo "  Target host: ${MIRROR_TARGET_HOST:-github.com}"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup GitHub CLI for source
+        env:
+          MIRROR_SOURCE_TOKEN: ${{ secrets.MIRROR_SOURCE_TOKEN }}
+          MIRROR_SOURCE_HOST: ${{ vars.MIRROR_SOURCE_HOST }}
+        run: |
+          if [ -z "$MIRROR_SOURCE_TOKEN" ]; then
+            echo "Error: MIRROR_SOURCE_TOKEN secret is not set"
+            exit 1
+          fi
+          
+          SOURCE_HOST="${MIRROR_SOURCE_HOST:-github.com}"
+          echo "$MIRROR_SOURCE_TOKEN" | gh auth login --with-token --hostname "$SOURCE_HOST"
+          gh auth setup-git
+
+      - name: Export teams from source organization
+        env:
+          MIRROR_SOURCE_TOKEN: ${{ secrets.MIRROR_SOURCE_TOKEN }}
+          MIRROR_SOURCE_ORG: ${{ vars.MIRROR_SOURCE_ORG }}
+          MIRROR_SOURCE_HOST: ${{ vars.MIRROR_SOURCE_HOST }}
+        run: |
+          chmod +x scripts/export-teams.sh
+          SOURCE_HOST="${MIRROR_SOURCE_HOST:-github.com}"
+          ./scripts/export-teams.sh "$MIRROR_SOURCE_ORG" "https://$SOURCE_HOST"
+
+      - name: Setup GitHub CLI for target
+        env:
+          MIRROR_TARGET_TOKEN: ${{ secrets.MIRROR_TARGET_TOKEN }}
+          MIRROR_TARGET_HOST: ${{ vars.MIRROR_TARGET_HOST }}
+        run: |
+          if [ -z "$MIRROR_TARGET_TOKEN" ]; then
+            echo "Error: MIRROR_TARGET_TOKEN secret is not set"
+            exit 1
+          fi
+          
+          TARGET_HOST="${MIRROR_TARGET_HOST:-github.com}"
+          echo "$MIRROR_TARGET_TOKEN" | gh auth login --with-token --hostname "$TARGET_HOST"
+          gh auth setup-git
+
+      - name: Mirror teams to target organization
+        env:
+          MIRROR_TARGET_TOKEN: ${{ secrets.MIRROR_TARGET_TOKEN }}
+          MIRROR_TARGET_ORG: ${{ vars.MIRROR_TARGET_ORG }}
+          MIRROR_TARGET_HOST: ${{ vars.MIRROR_TARGET_HOST }}
+        run: |
+          chmod +x scripts/mirror-teams.sh
+          TARGET_HOST="${MIRROR_TARGET_HOST:-github.com}"
+          ./scripts/mirror-teams.sh "$MIRROR_TARGET_ORG" "https://$TARGET_HOST"
+
+      - name: Upload team export as artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: team-export-${{ github.run_number }}
+          path: teams-export.json
+          retention-days: 30

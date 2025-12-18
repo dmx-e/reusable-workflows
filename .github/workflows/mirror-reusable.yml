@@ -1,0 +1,257 @@
+name: Reusable Mirror Workflow
+
+# This workflow automatically mirrors repositories to a target organization,
+# preserving the repository name and optionally creating it if it doesn't exist.
+#
+# Required Configuration in THIS repository (where the reusable workflow lives):
+#
+# VARIABLES (Settings → Secrets and variables → Actions → Variables):
+#   MIRROR_TARGET_ORG: Target organization/user name
+#   MIRROR_TARGET_HOST: (Optional) Target GitHub host, defaults to "github.com"
+#   CREATE_IF_NOT_EXISTS: Set to "true" to enable auto-creation of repos
+#   PRIVATE_REPO: Set to "true" or "false" for created repos
+#
+# SECRETS (Settings → Secrets and variables → Actions → Secrets):
+#   MIRROR_SSH_KEY: SSH private key for authentication
+#   MIRROR_GITHUB_TOKEN: GitHub token (only needed if CREATE_IF_NOT_EXISTS is true)
+#
+# ===== Example 1: GitHub.com =====
+# Variables:
+#   MIRROR_TARGET_ORG: "backup-org"
+#   MIRROR_TARGET_HOST: "github.com" (or leave empty, this is the default)
+#   CREATE_IF_NOT_EXISTS: "true"
+#   PRIVATE_REPO: "true"
+# Secrets:
+#   MIRROR_SSH_KEY: "-----BEGIN OPENSSH PRIVATE KEY-----\n..."
+#   MIRROR_GITHUB_TOKEN: "ghp_xxxxxxxxxxxxxxxxxxxx"
+# Result: source-org/my-app → backup-org/my-app (on GitHub.com)
+#
+# ===== Example 2: GitHub Enterprise Server =====
+# Variables:
+#   MIRROR_TARGET_ORG: "enterprise-backup-org"
+#   MIRROR_TARGET_HOST: "github.company.com"
+#   CREATE_IF_NOT_EXISTS: "true"
+#   PRIVATE_REPO: "false"
+# Secrets:
+#   MIRROR_SSH_KEY: "-----BEGIN OPENSSH PRIVATE KEY-----\n..."
+#   MIRROR_GITHUB_TOKEN: "ghp_xxxxxxxxxxxxxxxxxxxx"
+# Result: source-org/my-app → enterprise-backup-org/my-app (on github.company.com)
+#
+# ===== Example 3: Mirror only (no auto-creation) =====
+# Variables:
+#   MIRROR_TARGET_ORG: "backup-org"
+#   CREATE_IF_NOT_EXISTS: "false" (or don't set it)
+# Secrets:
+#   MIRROR_SSH_KEY: "-----BEGIN OPENSSH PRIVATE KEY-----\n..."
+# Note: Repository must already exist at the target
+
+on:
+  workflow_call:
+
+jobs:
+  check-and-mirror:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    
+    steps:
+      - name: Set up mirror configuration
+        id: config
+        env:
+          MIRROR_TARGET_ORG: ${{ vars.MIRROR_TARGET_ORG }}
+          MIRROR_TARGET_HOST: ${{ vars.MIRROR_TARGET_HOST }}
+          SOURCE_REPO_NAME: ${{ github.event.repository.name }}
+          SOURCE_ORG: ${{ github.repository_owner }}
+        run: |
+          if [ -z "$MIRROR_TARGET_ORG" ]; then
+            echo "Error: MIRROR_TARGET_ORG variable is not set"
+            exit 1
+          fi
+          
+          # Default to github.com if no host specified
+          HOST="${MIRROR_TARGET_HOST:-github.com}"
+          
+          # Construct mirror repository URL
+          MIRROR_URL="git@${HOST}:${MIRROR_TARGET_ORG}/${SOURCE_REPO_NAME}.git"
+          
+          echo "mirror_url=$MIRROR_URL" >> $GITHUB_OUTPUT
+          echo "mirror_owner=$MIRROR_TARGET_ORG" >> $GITHUB_OUTPUT
+          echo "mirror_repo_name=$SOURCE_REPO_NAME" >> $GITHUB_OUTPUT
+          echo "mirror_host=$HOST" >> $GITHUB_OUTPUT
+          
+          echo "Mirror configuration:"
+          echo "  Source: ${SOURCE_ORG}/${SOURCE_REPO_NAME}"
+          echo "  Target: $MIRROR_URL"
+          echo "  Owner: $MIRROR_TARGET_ORG"
+          echo "  Repo: $SOURCE_REPO_NAME"
+          echo "  Host: $HOST"
+      
+      - name: Handle deletion events
+        id: deletion
+        if: ${{ github.event_name == 'delete' }}
+        run: |
+          echo "Deletion event detected"
+          echo "Ref: ${{ github.event.ref }}"
+          echo "Ref type: ${{ github.event.ref_type }}"
+          echo "is_deletion=true" >> $GITHUB_OUTPUT
+          echo "deleted_ref=${{ github.event.ref }}" >> $GITHUB_OUTPUT
+          echo "ref_type=${{ github.event.ref_type }}" >> $GITHUB_OUTPUT
+      
+      - name: Checkout repository
+        if: ${{ github.event_name != 'delete' }}
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for all branches and tags
+      
+      - name: Setup SSH key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.MIRROR_SSH_KEY }}
+          MIRROR_HOST: ${{ steps.config.outputs.mirror_host }}
+        run: |
+          if [ -z "$SSH_PRIVATE_KEY" ]; then
+            echo "Error: SSH private key is not provided"
+            exit 1
+          fi
+          
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          
+          # Add target host to known_hosts
+          echo "Adding SSH host key for $MIRROR_HOST"
+          ssh-keyscan -H "$MIRROR_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+      
+      - name: Check if mirror repository exists
+        id: check_repo
+        if: ${{ vars.CREATE_IF_NOT_EXISTS == 'true' }}
+        env:
+          MIRROR_REPO_URL: ${{ steps.config.outputs.mirror_url }}
+        run: |
+          echo "Checking if mirror repository exists..."
+          
+          # Try to list remote refs to check if repo exists
+          if git ls-remote "$MIRROR_REPO_URL" HEAD > /dev/null 2>&1; then
+            echo "Repository exists"
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "Repository $MIRROR_REPO_URL does not exist"
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Create mirror repository if it doesn't exist
+        if: ${{ vars.CREATE_IF_NOT_EXISTS == 'true' && steps.check_repo.outputs.exists == 'false' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.MIRROR_GITHUB_TOKEN }}
+          MIRROR_OWNER: ${{ steps.config.outputs.mirror_owner }}
+          MIRROR_REPO_NAME: ${{ steps.config.outputs.mirror_repo_name }}
+          PRIVATE_REPO: ${{ vars.PRIVATE_REPO }}
+          MIRROR_HOST: ${{ steps.config.outputs.mirror_host }}
+        run: |
+          if [ -z "$GITHUB_TOKEN" ]; then
+            echo "Error: GitHub token is required to create repository"
+            exit 1
+          fi
+          
+          echo "Creating repository: $MIRROR_OWNER/$MIRROR_REPO_NAME"
+          
+          # Determine API endpoint based on host
+          if [ "$MIRROR_HOST" = "github.com" ]; then
+            API_BASE="https://api.github.com"
+          else
+            # GitHub Enterprise
+            API_BASE="https://$MIRROR_HOST/api/v3"
+          fi
+          
+          # Convert PRIVATE_REPO to proper boolean for JSON
+          if [ "$PRIVATE_REPO" = "true" ]; then
+            IS_PRIVATE="true"
+          else
+            IS_PRIVATE="false"
+          fi
+          
+          # Check if owner is an organization or user
+          ORG_CHECK=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            "$API_BASE/orgs/$MIRROR_OWNER" | jq -r '.type // "User"')
+          
+          echo "Organization check result: $ORG_CHECK"
+          
+          if [ "$ORG_CHECK" = "Organization" ]; then
+            # Create repository in organization
+            echo "Creating in organization..."
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+              -H "Authorization: token $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github.v3+json" \
+              "$API_BASE/orgs/$MIRROR_OWNER/repos" \
+              -d "{\"name\":\"$MIRROR_REPO_NAME\",\"private\":$IS_PRIVATE,\"auto_init\":false}")
+          else
+            # Create repository in user account
+            echo "Creating in user account..."
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+              -H "Authorization: token $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github.v3+json" \
+              "$API_BASE/user/repos" \
+              -d "{\"name\":\"$MIRROR_REPO_NAME\",\"private\":$IS_PRIVATE,\"auto_init\":false}")
+          fi
+          
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          
+          echo "HTTP Status: $HTTP_CODE"
+          echo "Response: $BODY"
+          
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+            echo "Repository created successfully"
+          else
+            echo "Error: Failed to create repository (HTTP $HTTP_CODE)"
+            echo "$BODY"
+            exit 1
+          fi
+          
+          # Wait a moment for the repository to be fully initialized
+          sleep 5
+      
+      - name: Configure Git
+        run: |
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
+      
+      - name: Add remote mirror repository
+        env:
+          MIRROR_REPO_URL: ${{ steps.config.outputs.mirror_url }}
+        run: |
+          echo "Adding mirror remote: $MIRROR_REPO_URL"
+          git remote add mirror "$MIRROR_REPO_URL"
+      
+      - name: Delete branch or tag from mirror
+        if: ${{ steps.deletion.outputs.is_deletion == 'true' }}
+        env:
+          DELETED_REF: ${{ steps.deletion.outputs.deleted_ref }}
+          REF_TYPE: ${{ steps.deletion.outputs.ref_type }}
+        run: |
+          echo "Deleting $REF_TYPE '$DELETED_REF' from mirror repository..."
+          
+          if [ "$REF_TYPE" = "branch" ]; then
+            git push mirror --delete "$DELETED_REF" || echo "Branch already deleted or does not exist in mirror"
+          elif [ "$REF_TYPE" = "tag" ]; then
+            git push mirror --delete "refs/tags/$DELETED_REF" || echo "Tag already deleted or does not exist in mirror"
+          fi
+          
+          echo "Deletion mirrored successfully"
+      
+      - name: Push to mirror repository
+        if: ${{ github.event_name != 'delete' }}
+        run: |
+          echo "Pushing branch ${GITHUB_REF#refs/heads/} to mirror repository..."
+          git push mirror "${GITHUB_REF#refs/heads/}" --force
+          echo "Successfully mirrored to remote repository"
+      
+      - name: Push all tags to mirror (optional)
+        if: ${{ github.event_name != 'delete' }}
+        run: |
+          if git tag | grep -q .; then
+            echo "Pushing tags to mirror repository..."
+            git push mirror --tags --force
+          else
+            echo "No tags to push"
+          fi
+        continue-on-error: true
