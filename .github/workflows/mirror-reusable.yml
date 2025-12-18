@@ -3,17 +3,24 @@ name: Reusable Mirror Workflow
 # This workflow automatically mirrors repositories to a target organization,
 # preserving the repository name and optionally creating it if it doesn't exist.
 #
-# Required Configuration in THIS repository (where the reusable workflow lives):
+# Required Configuration at ORGANIZATION level (Settings → Secrets and variables → Actions):
 #
-# VARIABLES (Settings → Secrets and variables → Actions → Variables):
+# IMPORTANT: After creating these secrets and variables, you must grant access to the
+# "reusable-workflows" repository (or "Selected repositories" that need to use this workflow).
+#
+# ORGANIZATION VARIABLES (Actions secrets and variables → Variables → New organization variable):
 #   MIRROR_TARGET_ORG: Target organization/user name
 #   MIRROR_TARGET_HOST: (Optional) Target GitHub host, defaults to "github.com"
 #   CREATE_IF_NOT_EXISTS: Set to "true" to enable auto-creation of repos
 #   PRIVATE_REPO: Set to "true" or "false" for created repos
+#   
+#   Repository access: Select "Private Repositories" or add "reusable-workflows" specifically
 #
-# SECRETS (Settings → Secrets and variables → Actions → Secrets):
+# ORGANIZATION SECRETS (Actions secrets and variables → Secrets → New organization secret):
 #   MIRROR_SSH_KEY: SSH private key for authentication
 #   MIRROR_GITHUB_TOKEN: GitHub token (only needed if CREATE_IF_NOT_EXISTS is true)
+#   
+#   Repository access: Select "Private Repositories" or add "reusable-workflows" specifically
 #
 # ===== Example 1: GitHub.com =====
 # Variables:
@@ -254,4 +261,3 @@ jobs:
           else
             echo "No tags to push"
           fi
-        continue-on-error: true
