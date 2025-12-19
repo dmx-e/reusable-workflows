@@ -1,0 +1,12 @@
+name: Mirror to Remote Repository
+
+on:
+  push:
+    branches:
+      - '**'
+  delete:  # Trigger when branches or tags are deleted
+
+jobs:
+  mirror:
+    uses: dmx-e/reusable-workflows/.github/workflows/mirror-reusable.yml@main
+    secrets: inherit
